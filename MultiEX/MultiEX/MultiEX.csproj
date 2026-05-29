@@ -1,16 +1,15 @@
 ﻿<Project Sdk="Microsoft.NET.Sdk">
 
   <PropertyGroup>
-    <OutputType>Exe</OutputType>
+    <OutputType>WinExe</OutputType>
     <TargetFramework>net8.0</TargetFramework>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
     <ImplicitUsings>enable</ImplicitUsings>
     <Nullable>enable</Nullable>
   </PropertyGroup>
 
   <ItemGroup>
-    <Reference Include="Program">
-      <HintPath>..\..\MultiCut\Program\bin\Debug\net8.0\Program.dll</HintPath>
-    </Reference>
+    <ProjectReference Include="..\..\MultiCut\MultiCutShortcut\MultiCutShortcut.csproj" />
   </ItemGroup>
 
 </Project>

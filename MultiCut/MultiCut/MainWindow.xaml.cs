@@ -12,10 +12,13 @@ using System.Windows.Shapes;
 namespace MultiCut
 {
     /// <summary>
-    /// Interaction logic for MainWindow.xaml
+    /// Main window for creating and managing multi-launch shortcuts.
     /// </summary>
     public partial class MainWindow : Window
     {
+        /// <summary>
+        /// Initializes a new instance of the <see cref="MainWindow"/> class.
+        /// </summary>
         public MainWindow()
         {
             InitializeComponent();

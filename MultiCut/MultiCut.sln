@@ -7,7 +7,7 @@ Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MultiCut", "MultiCut\MultiC
 EndProject
 Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MultiEX", "..\MultiEX\MultiEX\MultiEX.csproj", "{39D633E7-A8E0-41D7-AD51-9384B9EA7878}"
 EndProject
-Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "Program", "Program\Program.csproj", "{27D32CC1-31C4-4D3D-AEC5-CE60BCABE45A}"
+Project("{FAE04EC0-301F-11D3-BF4B-00C04F79EFBC}") = "MultiCutShortcut", "MultiCutShortcut\MultiCutShortcut.csproj", "{27D32CC1-31C4-4D3D-AEC5-CE60BCABE45A}"
 EndProject
 Global
 	GlobalSection(SolutionConfigurationPlatforms) = preSolution

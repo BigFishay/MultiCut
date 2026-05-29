@@ -9,7 +9,7 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <ProjectReference Include="..\Program\Program.csproj" />
+    <ProjectReference Include="..\MultiCutShortcut\MultiCutShortcut.csproj" />
   </ItemGroup>
 
 </Project>

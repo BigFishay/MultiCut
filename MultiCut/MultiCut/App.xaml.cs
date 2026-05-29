@@ -5,7 +5,7 @@ using System.Windows;
 namespace MultiCut
 {
     /// <summary>
-    /// Interaction logic for App.xaml
+    /// Application root for the MultiCut WPF UI.
     /// </summary>
     public partial class App : Application
     {

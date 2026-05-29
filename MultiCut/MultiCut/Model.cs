@@ -1,15 +1,14 @@
-﻿using System;
-using System.Collections.Generic;
-using System.Linq;
-using System.Text;
-using System.Threading.Tasks;
-using Program;
+using MultiCut.Services;
 
-namespace MultiCut
+namespace MultiCut;
+
+/// <summary>
+/// Root model entry point for UI state and shortcut-management behavior.
+/// </summary>
+internal class Model
 {
-    internal class Model
-    {
-
-    }
-
+    /// <summary>
+    /// Gets the UI-facing backend API for loading, saving, and creating MultiCut shortcuts.
+    /// </summary>
+    public MultiCutAppService MultiCuts { get; } = new();
 }
