@@ -12,4 +12,39 @@
     <ProjectReference Include="..\MultiCutShortcut\MultiCutShortcut.csproj" />
   </ItemGroup>
 
+  <ItemGroup>
+    <PackageReference Include="Microsoft.Data.Sqlite" Version="10.0.8" />
+  </ItemGroup>
+
+  <Target Name="CopyMultiEXToOutput" AfterTargets="Build" Condition="'$(PublishProfile)' == ''">
+    <MSBuild
+      Projects="..\..\MultiEX\MultiEX\MultiEX.csproj"
+      Targets="Build"
+      Properties="Configuration=$(Configuration)" />
+    <ItemGroup>
+      <MultiEXOutput Include="..\..\MultiEX\MultiEX\bin\$(Configuration)\net8.0\MultiEX.*" />
+    </ItemGroup>
+    <Copy
+      SourceFiles="@(MultiEXOutput)"
+      DestinationFolder="$(OutDir)"
+      SkipUnchangedFiles="true" />
+  </Target>
+
+  <Target Name="PublishMultiEXToMultiCutOutput" AfterTargets="Publish" Condition="'$(RuntimeIdentifier)' != '' and '$(SelfContained)' == 'true'">
+    <PropertyGroup>
+      <MultiEXPublishDir>$(MSBuildProjectDirectory)\..\..\MultiEX\MultiEX\obj\MultiEXPublish\</MultiEXPublishDir>
+    </PropertyGroup>
+    <MSBuild
+      Projects="..\..\MultiEX\MultiEX\MultiEX.csproj"
+      Targets="Restore;Publish"
+      Properties="Configuration=$(Configuration);RuntimeIdentifier=$(RuntimeIdentifier);SelfContained=$(SelfContained);PublishDir=$(MultiEXPublishDir)" />
+    <ItemGroup>
+      <MultiEXPublishOutput Include="$(MultiEXPublishDir)**\*" />
+    </ItemGroup>
+    <Copy
+      SourceFiles="@(MultiEXPublishOutput)"
+      DestinationFiles="@(MultiEXPublishOutput->'$(PublishDir)%(RecursiveDir)%(Filename)%(Extension)')"
+      SkipUnchangedFiles="true" />
+  </Target>
+
 </Project>

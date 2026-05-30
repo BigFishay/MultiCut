@@ -1,3 +1,5 @@
+using System.IO;
+using MultiCut.Data;
 using MultiCut.Shortcuts;
 
 namespace MultiCut.Services;
@@ -6,40 +8,53 @@ namespace MultiCut.Services;
 /// Provides the simple backend API intended for future view models.
 /// </summary>
 /// <remarks>
-/// This facade keeps view models from coordinating JSON paths, file writes, shortcut
-/// creation, and exception handling on their own.
+/// SQLite is the source of truth for the UI. JSON files are generated launch artifacts
+/// that MultiEX consumes when a Windows shortcut is opened.
 /// </remarks>
 public sealed class MultiCutAppService
 {
     private const string StorageMutexName = @"Local\MultiCutStorage";
     private static readonly TimeSpan StorageLockTimeout = TimeSpan.FromSeconds(10);
 
-    private readonly MultiCutStore multiCutStore;
-    private readonly ShortcutCreationService shortcutCreationService;
     private readonly MultiCutPathService pathService;
+    private readonly MultiCutRepository repository;
+    private readonly ShortcutCreationService shortcutCreationService;
+    private bool initialized;
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MultiCutAppService"/> class.
     /// </summary>
     public MultiCutAppService()
-        : this(new MultiCutStore(), new ShortcutCreationService(), new MultiCutPathService())
+        : this(new MultiCutPathService())
+    {
+    }
+
+    /// <summary>
+    /// Initializes a new instance of the <see cref="MultiCutAppService"/> class with a path service.
+    /// </summary>
+    /// <param name="pathService">The path service used by the app.</param>
+    public MultiCutAppService(MultiCutPathService pathService)
+        : this(
+            pathService,
+            new MultiCutRepository(pathService.DefaultDatabasePath),
+            new ShortcutCreationService())
     {
     }
 
     /// <summary>
     /// Initializes a new instance of the <see cref="MultiCutAppService"/> class with explicit dependencies.
     /// </summary>
-    /// <param name="multiCutStore">The JSON-backed MultiCut store.</param>
+    /// <param name="pathService">The path service used by the app.</param>
+    /// <param name="repository">The SQLite repository.</param>
     /// <param name="shortcutCreationService">The Windows shortcut creation service.</param>
-    /// <param name="pathService">The path service.</param>
     public MultiCutAppService(
-        MultiCutStore multiCutStore,
-        ShortcutCreationService shortcutCreationService,
-        MultiCutPathService pathService)
+        MultiCutPathService pathService,
+        MultiCutRepository repository,
+        ShortcutCreationService shortcutCreationService)
     {
-        this.multiCutStore = multiCutStore;
-        this.shortcutCreationService = shortcutCreationService;
         this.pathService = pathService;
+        this.repository = repository;
+        this.shortcutCreationService = shortcutCreationService;
     }
 
     /// <summary>
@@ -48,7 +63,12 @@ public sealed class MultiCutAppService
     public string? MultiExPath { get; set; }
 
     /// <summary>
-    /// Gets the default directory where MultiCut JSON files are written.
+    /// Gets the default SQLite database path.
+    /// </summary>
+    public string DefaultDatabasePath => pathService.DefaultDatabasePath;
+
+    /// <summary>
+    /// Gets the default directory where MultiCut JSON files are generated.
     /// </summary>
     public string DefaultJsonDirectory => pathService.DefaultJsonDirectory;
 
@@ -58,54 +78,67 @@ public sealed class MultiCutAppService
     public string DefaultShortcutDirectory => pathService.DefaultShortcutDirectory;
 
     /// <summary>
-    /// Gets the currently loaded MultiCuts as a read-only snapshot.
+    /// Creates the database file and schema if needed.
     /// </summary>
-    public IReadOnlyList<MultiCutShortcut> LoadedMultiCuts => multiCutStore.LoadedMultiCuts;
-
-    /// <summary>
-    /// Gets the unique launch targets currently referenced by loaded MultiCuts.
-    /// </summary>
-    public IReadOnlyList<LaunchTarget> LoadedLaunchTargets => multiCutStore.LoadedLaunchTargets;
-
-    /// <summary>
-    /// Gets the currently loaded MultiCuts keyed by absolute JSON path.
-    /// </summary>
-    public IReadOnlyDictionary<string, MultiCutShortcut> MultiCutsByJsonPath => multiCutStore.MultiCutsByJsonPath;
-
-    /// <summary>
-    /// Loads MultiCuts from the default JSON directory.
-    /// </summary>
-    /// <returns>The loaded MultiCuts and any skipped-file diagnostics.</returns>
-    public OperationResult<LoadMultiCutsResult> LoadDefaultMultiCuts()
+    /// <returns>The operation result.</returns>
+    public OperationResult Initialize()
     {
         return Run(
-            () => WithStorageLock(() => multiCutStore.LoadFromDirectoryWithDiagnostics(DefaultJsonDirectory)),
-            BuildLoadMessage,
+            () =>
+            {
+                EnsureInitialized();
+                return true;
+            },
+            _ => "MultiCut database is ready.",
+            "Unable to initialize MultiCut database.");
+    }
+
+    /// <summary>
+    /// Gets every current MultiCut for read-only UI list views.
+    /// </summary>
+    /// <returns>The current MultiCut list.</returns>
+    public OperationResult<IReadOnlyList<MultiCutListItem>> GetCurrentMultiCuts()
+    {
+        return Run(
+            () => WithStorageLock(repository.GetCurrentMultiCuts),
+            multiCuts => $"Loaded {multiCuts.Count} MultiCuts.",
             "Unable to load MultiCuts.");
     }
 
     /// <summary>
-    /// Loads MultiCuts from a directory.
+    /// Gets every current reusable launch target for read-only UI list views.
     /// </summary>
-    /// <param name="directoryPath">The directory to scan.</param>
-    /// <returns>The loaded MultiCuts and any skipped-file diagnostics.</returns>
-    public OperationResult<LoadMultiCutsResult> LoadMultiCuts(string directoryPath)
+    /// <returns>The current launch target list.</returns>
+    public OperationResult<IReadOnlyList<LaunchTargetListItem>> GetCurrentLaunchTargets()
     {
         return Run(
-            () => WithStorageLock(() => multiCutStore.LoadFromDirectoryWithDiagnostics(directoryPath)),
-            BuildLoadMessage,
-            "Unable to load MultiCuts.");
+            () => WithStorageLock(repository.GetCurrentLaunchTargets),
+            launchTargets => $"Loaded {launchTargets.Count} launch targets.",
+            "Unable to load launch targets.");
     }
 
     /// <summary>
-    /// Creates and saves a MultiCut.
+    /// Gets one complete MultiCut for editing.
+    /// </summary>
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
+    /// <returns>The matching MultiCut record.</returns>
+    public OperationResult<MultiCutRecord> GetMultiCut(long multiCutId)
+    {
+        return Run(
+            () => WithStorageLock(() => repository.GetMultiCut(multiCutId)),
+            "MultiCut loaded.",
+            "Unable to load MultiCut.");
+    }
+
+    /// <summary>
+    /// Creates or replaces a MultiCut in the database and writes its generated JSON file.
     /// </summary>
     /// <param name="name">The user-facing MultiCut name.</param>
-    /// <param name="launchTargets">The launch targets that MultiEX should open.</param>
+    /// <param name="launchTargets">The ordered launch targets assigned to the MultiCut.</param>
     /// <param name="jsonPath">An optional explicit JSON path.</param>
-    /// <param name="overwrite">Whether an existing JSON file can be replaced.</param>
-    /// <returns>The created MultiCut.</returns>
-    public OperationResult<MultiCutShortcut> CreateMultiCut(
+    /// <param name="overwrite">Whether an existing MultiCut at the same JSON path can be replaced.</param>
+    /// <returns>The saved MultiCut record.</returns>
+    public OperationResult<MultiCutRecord> SaveMultiCut(
         string name,
         IEnumerable<LaunchTarget> launchTargets,
         string? jsonPath = null,
@@ -114,52 +147,133 @@ public sealed class MultiCutAppService
         return Run(
             () => WithStorageLock(() =>
             {
-                string targetJsonPath = ResolveJsonPath(name, jsonPath);
-                return multiCutStore.Create(name, targetJsonPath, launchTargets, overwrite);
+                List<LaunchTarget> launchTargetSnapshot = launchTargets.ToList();
+                MultiCutRecord multiCut = repository.SaveMultiCut(
+                    name,
+                    ResolveJsonPath(name, jsonPath),
+                    launchTargetSnapshot,
+                    overwrite: overwrite);
+                WriteJson(multiCut);
+                return multiCut;
             }),
-            "MultiCut created.",
-            "Unable to create MultiCut.");
-    }
-
-    /// <summary>
-    /// Saves an existing MultiCut.
-    /// </summary>
-    /// <param name="multiCut">The MultiCut to save.</param>
-    /// <param name="overwrite">Whether an existing JSON file can be replaced.</param>
-    /// <returns>The saved MultiCut.</returns>
-    public OperationResult<MultiCutShortcut> SaveMultiCut(MultiCutShortcut multiCut, bool overwrite = true)
-    {
-        return Run(
-            () => WithStorageLock(() => multiCutStore.Save(multiCut, overwrite)),
             "MultiCut saved.",
             "Unable to save MultiCut.");
     }
 
     /// <summary>
-    /// Deletes a MultiCut from the index and optionally removes its JSON file.
+    /// Updates an existing MultiCut by ID and rewrites its generated JSON file.
     /// </summary>
-    /// <param name="jsonPath">The JSON path to delete.</param>
-    /// <param name="deleteJsonFile">Whether the JSON file should be deleted from disk.</param>
-    /// <returns>A result describing whether anything was removed.</returns>
-    public OperationResult DeleteMultiCut(string jsonPath, bool deleteJsonFile = true)
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
+    /// <param name="name">The user-facing MultiCut name.</param>
+    /// <param name="launchTargets">The ordered launch targets assigned to the MultiCut.</param>
+    /// <param name="jsonPath">An optional replacement JSON path. When omitted, the current path is kept.</param>
+    /// <param name="deleteOldJsonFile">Whether to delete the old JSON file when the JSON path changes.</param>
+    /// <returns>The updated MultiCut record.</returns>
+    public OperationResult<MultiCutRecord> UpdateMultiCut(
+        long multiCutId,
+        string name,
+        IEnumerable<LaunchTarget> launchTargets,
+        string? jsonPath = null,
+        bool deleteOldJsonFile = true)
     {
         return Run(
-            () => WithStorageLock(() => multiCutStore.Delete(jsonPath, deleteJsonFile)),
-            removed => removed ? "MultiCut deleted." : "No matching MultiCut was found.",
-            "Unable to delete MultiCut.");
+            () => WithStorageLock(() =>
+            {
+                List<LaunchTarget> launchTargetSnapshot = launchTargets.ToList();
+                MultiCutRecord oldMultiCut = repository.GetMultiCut(multiCutId);
+                MultiCutRecord updatedMultiCut = repository.UpdateMultiCut(
+                    multiCutId,
+                    name,
+                    launchTargetSnapshot,
+                    jsonPath);
+
+                WriteJson(updatedMultiCut);
+                bool jsonPathChanged = !string.Equals(
+                    oldMultiCut.JsonPath,
+                    updatedMultiCut.JsonPath,
+                    StringComparison.OrdinalIgnoreCase);
+                if (jsonPathChanged)
+                {
+                    RefreshShortcutForJsonPathChange(updatedMultiCut);
+                    DeleteGeneratedFile(deleteOldJsonFile, oldMultiCut.JsonPath);
+                }
+
+                return updatedMultiCut;
+            }),
+            "MultiCut updated.",
+            "Unable to update MultiCut.");
     }
 
     /// <summary>
-    /// Creates a Windows shortcut for an existing MultiCut.
+    /// Creates or replaces a MultiCut, writes its JSON file, and creates its Windows shortcut.
     /// </summary>
-    /// <param name="multiCut">The MultiCut whose JSON file should be passed to MultiEX.</param>
+    /// <param name="name">The user-facing MultiCut name.</param>
+    /// <param name="launchTargets">The ordered launch targets assigned to the MultiCut.</param>
+    /// <param name="jsonPath">An optional explicit JSON path.</param>
+    /// <param name="shortcutPath">An optional explicit .lnk path.</param>
+    /// <param name="multiExPath">An optional explicit MultiEX.exe path.</param>
+    /// <param name="iconPath">An optional icon source path.</param>
+    /// <param name="iconIndex">An optional icon index.</param>
+    /// <param name="overwrite">Whether an existing MultiCut at the same JSON path can be replaced.</param>
+    /// <returns>The saved MultiCut record.</returns>
+    public OperationResult<MultiCutRecord> SaveMultiCutWithShortcut(
+        string name,
+        IEnumerable<LaunchTarget> launchTargets,
+        string? jsonPath = null,
+        string? shortcutPath = null,
+        string? multiExPath = null,
+        string? iconPath = null,
+        int? iconIndex = null,
+        bool overwrite = false)
+    {
+        return Run(
+            () => WithStorageLock(() =>
+            {
+                List<LaunchTarget> launchTargetSnapshot = launchTargets.ToList();
+                string resolvedShortcutPath = ResolveShortcutPath(name, shortcutPath);
+                MultiCutRecord multiCut = repository.SaveMultiCut(
+                    name,
+                    ResolveJsonPath(name, jsonPath),
+                    launchTargetSnapshot,
+                    overwrite: overwrite);
+                WriteJson(multiCut);
+                CreateShortcutFile(multiCut, resolvedShortcutPath, multiExPath, iconPath, iconIndex);
+                repository.UpdateShortcutMetadata(multiCut.Id, resolvedShortcutPath, iconPath, iconIndex);
+                return repository.GetMultiCut(multiCut.Id);
+            }),
+            "MultiCut and shortcut saved.",
+            "Unable to save MultiCut and shortcut.");
+    }
+
+    /// <summary>
+    /// Regenerates the JSON file for an existing database MultiCut.
+    /// </summary>
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
+    /// <returns>The regenerated MultiCut record.</returns>
+    public OperationResult<MultiCutRecord> RegenerateJson(long multiCutId)
+    {
+        return Run(
+            () => WithStorageLock(() =>
+            {
+                MultiCutRecord multiCut = repository.GetMultiCut(multiCutId);
+                WriteJson(multiCut);
+                return multiCut;
+            }),
+            "MultiCut JSON regenerated.",
+            "Unable to regenerate MultiCut JSON.");
+    }
+
+    /// <summary>
+    /// Creates or replaces a Windows shortcut for an existing MultiCut.
+    /// </summary>
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
     /// <param name="shortcutPath">An optional explicit .lnk path.</param>
     /// <param name="multiExPath">An optional explicit MultiEX.exe path.</param>
     /// <param name="iconPath">An optional icon source path.</param>
     /// <param name="iconIndex">An optional icon index.</param>
     /// <returns>The created shortcut path.</returns>
     public OperationResult<string> CreateShortcut(
-        MultiCutShortcut multiCut,
+        long multiCutId,
         string? shortcutPath = null,
         string? multiExPath = null,
         string? iconPath = null,
@@ -168,133 +282,191 @@ public sealed class MultiCutAppService
         return Run(
             () => WithStorageLock(() =>
             {
-                ArgumentNullException.ThrowIfNull(multiCut);
+                MultiCutRecord multiCut = repository.GetMultiCut(multiCutId);
+                string resolvedShortcutPath = ResolveShortcutPath(multiCut.Name, shortcutPath);
+                string? resolvedIconPath = iconPath ?? multiCut.IconPath;
+                int? resolvedIconIndex = iconIndex ?? multiCut.IconIndex;
 
-                string targetShortcutPath = ResolveShortcutPath(multiCut.Name, shortcutPath);
-                string targetMultiExPath = pathService.ResolveMultiExPath(multiExPath ?? MultiExPath);
-                shortcutCreationService.CreateShortcut(
-                    multiCut,
-                    targetShortcutPath,
-                    targetMultiExPath,
-                    iconPath,
-                    iconIndex);
+                WriteJson(multiCut);
+                CreateShortcutFile(multiCut, resolvedShortcutPath, multiExPath, resolvedIconPath, resolvedIconIndex);
+                repository.UpdateShortcutMetadata(
+                    multiCut.Id,
+                    resolvedShortcutPath,
+                    resolvedIconPath,
+                    resolvedIconIndex);
 
-                return targetShortcutPath;
+                return resolvedShortcutPath;
             }),
             "Shortcut created.",
             "Unable to create shortcut.");
     }
 
     /// <summary>
-    /// Creates a MultiCut JSON file and its Windows shortcut as one ordered operation.
+    /// Updates a reusable launch target and regenerates every affected parent JSON file.
     /// </summary>
-    /// <param name="name">The user-facing MultiCut name.</param>
-    /// <param name="launchTargets">The launch targets that MultiEX should open.</param>
-    /// <param name="jsonPath">An optional explicit JSON path.</param>
-    /// <param name="shortcutPath">An optional explicit .lnk path.</param>
-    /// <param name="multiExPath">An optional explicit MultiEX.exe path.</param>
-    /// <param name="iconPath">An optional icon source path.</param>
-    /// <param name="iconIndex">An optional icon index.</param>
-    /// <param name="overwrite">Whether existing files can be replaced.</param>
-    /// <returns>The created MultiCut.</returns>
-    public OperationResult<MultiCutShortcut> CreateMultiCutWithShortcut(
-        string name,
-        IEnumerable<LaunchTarget> launchTargets,
-        string? jsonPath = null,
-        string? shortcutPath = null,
-        string? multiExPath = null,
-        string? iconPath = null,
-        int? iconIndex = null,
-        bool overwrite = false)
+    /// <param name="launchTargetId">The launch target database identifier.</param>
+    /// <param name="launchTarget">The updated launch target values.</param>
+    /// <returns>The affected parent MultiCuts.</returns>
+    public OperationResult<IReadOnlyList<MultiCutRecord>> UpdateLaunchTarget(
+        long launchTargetId,
+        LaunchTarget launchTarget)
     {
         return Run(
             () => WithStorageLock(() =>
             {
-                string targetJsonPath = ResolveJsonPath(name, jsonPath);
-                string targetShortcutPath = ResolveShortcutPath(name, shortcutPath);
-                string targetMultiExPath = pathService.ResolveMultiExPath(multiExPath ?? MultiExPath);
+                IReadOnlyList<MultiCutRecord> affectedMultiCuts =
+                    repository.UpdateLaunchTarget(launchTargetId, launchTarget);
+                foreach (MultiCutRecord multiCut in affectedMultiCuts)
+                {
+                    WriteJson(multiCut);
+                }
 
-                MultiCutShortcut multiCut = multiCutStore.Create(name, targetJsonPath, launchTargets, overwrite);
-                shortcutCreationService.CreateShortcut(
-                    multiCut,
-                    targetShortcutPath,
-                    targetMultiExPath,
-                    iconPath,
-                    iconIndex);
-
-                return multiCut;
+                return affectedMultiCuts;
             }),
-            "MultiCut and shortcut created.",
-            "Unable to create MultiCut and shortcut.");
+            affectedMultiCuts => $"Updated launch target and regenerated {affectedMultiCuts.Count} MultiCut JSON file(s).",
+            "Unable to update launch target.");
     }
 
     /// <summary>
-    /// Loads MultiCuts from the default JSON directory without blocking the UI thread.
+    /// Deletes a MultiCut and optionally removes its generated artifacts.
     /// </summary>
-    /// <param name="cancellationToken">A token used to cancel the background operation.</param>
-    /// <returns>The loaded MultiCuts and any skipped-file diagnostics.</returns>
-    public Task<OperationResult<LoadMultiCutsResult>> LoadDefaultMultiCutsAsync(
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
+    /// <param name="deleteJsonFile">Whether to delete the generated JSON file.</param>
+    /// <param name="deleteShortcutFile">Whether to delete the Windows shortcut file when known.</param>
+    /// <returns>The operation result.</returns>
+    public OperationResult DeleteMultiCut(
+        long multiCutId,
+        bool deleteJsonFile = true,
+        bool deleteShortcutFile = false)
+    {
+        return Run(
+            () => WithStorageLock(() =>
+            {
+                MultiCutRecord? deletedMultiCut = repository.DeleteMultiCut(multiCutId);
+                if (deletedMultiCut is null)
+                {
+                    return false;
+                }
+
+                DeleteGeneratedFile(deleteJsonFile, deletedMultiCut.JsonPath);
+                DeleteGeneratedFile(deleteShortcutFile, deletedMultiCut.ShortcutPath);
+                return true;
+            }),
+            deleted => deleted ? "MultiCut deleted." : "No matching MultiCut was found.",
+            "Unable to delete MultiCut.");
+    }
+
+    /// <summary>
+    /// Gets every current MultiCut without blocking the UI thread.
+    /// </summary>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The current MultiCut list.</returns>
+    public Task<OperationResult<IReadOnlyList<MultiCutListItem>>> GetCurrentMultiCutsAsync(
         CancellationToken cancellationToken = default)
     {
-        return RunAsync(LoadDefaultMultiCuts, cancellationToken);
+        return RunAsync(GetCurrentMultiCuts, cancellationToken);
     }
 
     /// <summary>
-    /// Loads MultiCuts from a directory without blocking the UI thread.
+    /// Gets every current launch target without blocking the UI thread.
     /// </summary>
-    /// <param name="directoryPath">The directory to scan.</param>
-    /// <param name="cancellationToken">A token used to cancel the background operation.</param>
-    /// <returns>The loaded MultiCuts and any skipped-file diagnostics.</returns>
-    public Task<OperationResult<LoadMultiCutsResult>> LoadMultiCutsAsync(
-        string directoryPath,
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The current launch target list.</returns>
+    public Task<OperationResult<IReadOnlyList<LaunchTargetListItem>>> GetCurrentLaunchTargetsAsync(
         CancellationToken cancellationToken = default)
     {
-        return RunAsync(() => LoadMultiCuts(directoryPath), cancellationToken);
+        return RunAsync(GetCurrentLaunchTargets, cancellationToken);
     }
 
     /// <summary>
-    /// Creates and saves a MultiCut without blocking the UI thread.
+    /// Creates the database file and schema without blocking the UI thread.
+    /// </summary>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The operation result.</returns>
+    public Task<OperationResult> InitializeAsync(CancellationToken cancellationToken = default)
+    {
+        return RunAsync(Initialize, cancellationToken);
+    }
+
+    /// <summary>
+    /// Gets one complete MultiCut for editing without blocking the UI thread.
+    /// </summary>
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The matching MultiCut record.</returns>
+    public Task<OperationResult<MultiCutRecord>> GetMultiCutAsync(
+        long multiCutId,
+        CancellationToken cancellationToken = default)
+    {
+        return RunAsync(() => GetMultiCut(multiCutId), cancellationToken);
+    }
+
+    /// <summary>
+    /// Creates or replaces a MultiCut without blocking the UI thread.
     /// </summary>
     /// <param name="name">The user-facing MultiCut name.</param>
-    /// <param name="launchTargets">The launch targets that MultiEX should open.</param>
+    /// <param name="launchTargets">The ordered launch targets assigned to the MultiCut.</param>
     /// <param name="jsonPath">An optional explicit JSON path.</param>
-    /// <param name="overwrite">Whether an existing JSON file can be replaced.</param>
-    /// <param name="cancellationToken">A token used to cancel the background operation.</param>
-    /// <returns>The created MultiCut.</returns>
-    public Task<OperationResult<MultiCutShortcut>> CreateMultiCutAsync(
+    /// <param name="overwrite">Whether an existing MultiCut at the same JSON path can be replaced.</param>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The saved MultiCut record.</returns>
+    public Task<OperationResult<MultiCutRecord>> SaveMultiCutAsync(
         string name,
         IEnumerable<LaunchTarget> launchTargets,
         string? jsonPath = null,
         bool overwrite = false,
         CancellationToken cancellationToken = default)
     {
-        List<LaunchTarget> launchTargetSnapshot;
-        try
+        if (!TrySnapshotLaunchTargets(launchTargets, "Unable to save MultiCut.", out List<LaunchTarget> snapshot, out OperationResult<MultiCutRecord> failure))
         {
-            launchTargetSnapshot = launchTargets.ToList();
-        }
-        catch (Exception exception)
-        {
-            return Task.FromResult(OperationResult<MultiCutShortcut>.Failed("Unable to create MultiCut.", exception));
+            return Task.FromResult(failure);
         }
 
-        return RunAsync(() => CreateMultiCut(name, launchTargetSnapshot, jsonPath, overwrite), cancellationToken);
+        return RunAsync(() => SaveMultiCut(name, snapshot, jsonPath, overwrite), cancellationToken);
     }
 
     /// <summary>
-    /// Creates a MultiCut JSON file and its Windows shortcut without blocking the UI thread.
+    /// Updates an existing MultiCut without blocking the UI thread.
+    /// </summary>
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
+    /// <param name="name">The user-facing MultiCut name.</param>
+    /// <param name="launchTargets">The ordered launch targets assigned to the MultiCut.</param>
+    /// <param name="jsonPath">An optional replacement JSON path. When omitted, the current path is kept.</param>
+    /// <param name="deleteOldJsonFile">Whether to delete the old JSON file when the JSON path changes.</param>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The updated MultiCut record.</returns>
+    public Task<OperationResult<MultiCutRecord>> UpdateMultiCutAsync(
+        long multiCutId,
+        string name,
+        IEnumerable<LaunchTarget> launchTargets,
+        string? jsonPath = null,
+        bool deleteOldJsonFile = true,
+        CancellationToken cancellationToken = default)
+    {
+        if (!TrySnapshotLaunchTargets(launchTargets, "Unable to update MultiCut.", out List<LaunchTarget> snapshot, out OperationResult<MultiCutRecord> failure))
+        {
+            return Task.FromResult(failure);
+        }
+
+        return RunAsync(
+            () => UpdateMultiCut(multiCutId, name, snapshot, jsonPath, deleteOldJsonFile),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Creates or replaces a MultiCut and shortcut without blocking the UI thread.
     /// </summary>
     /// <param name="name">The user-facing MultiCut name.</param>
-    /// <param name="launchTargets">The launch targets that MultiEX should open.</param>
+    /// <param name="launchTargets">The ordered launch targets assigned to the MultiCut.</param>
     /// <param name="jsonPath">An optional explicit JSON path.</param>
     /// <param name="shortcutPath">An optional explicit .lnk path.</param>
     /// <param name="multiExPath">An optional explicit MultiEX.exe path.</param>
     /// <param name="iconPath">An optional icon source path.</param>
     /// <param name="iconIndex">An optional icon index.</param>
-    /// <param name="overwrite">Whether existing files can be replaced.</param>
-    /// <param name="cancellationToken">A token used to cancel the background operation.</param>
-    /// <returns>The created MultiCut.</returns>
-    public Task<OperationResult<MultiCutShortcut>> CreateMultiCutWithShortcutAsync(
+    /// <param name="overwrite">Whether an existing MultiCut at the same JSON path can be replaced.</param>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The saved MultiCut record.</returns>
+    public Task<OperationResult<MultiCutRecord>> SaveMultiCutWithShortcutAsync(
         string name,
         IEnumerable<LaunchTarget> launchTargets,
         string? jsonPath = null,
@@ -305,22 +477,15 @@ public sealed class MultiCutAppService
         bool overwrite = false,
         CancellationToken cancellationToken = default)
     {
-        List<LaunchTarget> launchTargetSnapshot;
-        try
+        if (!TrySnapshotLaunchTargets(launchTargets, "Unable to save MultiCut and shortcut.", out List<LaunchTarget> snapshot, out OperationResult<MultiCutRecord> failure))
         {
-            launchTargetSnapshot = launchTargets.ToList();
-        }
-        catch (Exception exception)
-        {
-            return Task.FromResult(OperationResult<MultiCutShortcut>.Failed(
-                "Unable to create MultiCut and shortcut.",
-                exception));
+            return Task.FromResult(failure);
         }
 
         return RunAsync(
-            () => CreateMultiCutWithShortcut(
+            () => SaveMultiCutWithShortcut(
                 name,
-                launchTargetSnapshot,
+                snapshot,
                 jsonPath,
                 shortcutPath,
                 multiExPath,
@@ -331,61 +496,30 @@ public sealed class MultiCutAppService
     }
 
     /// <summary>
-    /// Saves an existing MultiCut without blocking the UI thread.
+    /// Regenerates one MultiCut JSON file without blocking the UI thread.
     /// </summary>
-    /// <param name="multiCut">The MultiCut to save.</param>
-    /// <param name="overwrite">Whether an existing JSON file can be replaced.</param>
-    /// <param name="cancellationToken">A token used to cancel the background operation.</param>
-    /// <returns>The saved MultiCut.</returns>
-    public Task<OperationResult<MultiCutShortcut>> SaveMultiCutAsync(
-        MultiCutShortcut multiCut,
-        bool overwrite = true,
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The regenerated MultiCut record.</returns>
+    public Task<OperationResult<MultiCutRecord>> RegenerateJsonAsync(
+        long multiCutId,
         CancellationToken cancellationToken = default)
     {
-        MultiCutShortcut multiCutSnapshot;
-        try
-        {
-            ArgumentNullException.ThrowIfNull(multiCut);
-            multiCutSnapshot = new MultiCutShortcut(
-                multiCut.Name,
-                multiCut.JsonPath,
-                multiCut.LaunchTargets.ToList());
-        }
-        catch (Exception exception)
-        {
-            return Task.FromResult(OperationResult<MultiCutShortcut>.Failed("Unable to save MultiCut.", exception));
-        }
-
-        return RunAsync(() => SaveMultiCut(multiCutSnapshot, overwrite), cancellationToken);
+        return RunAsync(() => RegenerateJson(multiCutId), cancellationToken);
     }
 
     /// <summary>
-    /// Deletes a MultiCut without blocking the UI thread.
+    /// Creates or replaces a Windows shortcut without blocking the UI thread.
     /// </summary>
-    /// <param name="jsonPath">The JSON path to delete.</param>
-    /// <param name="deleteJsonFile">Whether the JSON file should be deleted from disk.</param>
-    /// <param name="cancellationToken">A token used to cancel the background operation.</param>
-    /// <returns>A result describing whether anything was removed.</returns>
-    public Task<OperationResult> DeleteMultiCutAsync(
-        string jsonPath,
-        bool deleteJsonFile = true,
-        CancellationToken cancellationToken = default)
-    {
-        return RunAsync(() => DeleteMultiCut(jsonPath, deleteJsonFile), cancellationToken);
-    }
-
-    /// <summary>
-    /// Creates a Windows shortcut without blocking the UI thread.
-    /// </summary>
-    /// <param name="multiCut">The MultiCut whose JSON file should be passed to MultiEX.</param>
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
     /// <param name="shortcutPath">An optional explicit .lnk path.</param>
     /// <param name="multiExPath">An optional explicit MultiEX.exe path.</param>
     /// <param name="iconPath">An optional icon source path.</param>
     /// <param name="iconIndex">An optional icon index.</param>
-    /// <param name="cancellationToken">A token used to cancel the background operation.</param>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
     /// <returns>The created shortcut path.</returns>
     public Task<OperationResult<string>> CreateShortcutAsync(
-        MultiCutShortcut multiCut,
+        long multiCutId,
         string? shortcutPath = null,
         string? multiExPath = null,
         string? iconPath = null,
@@ -393,7 +527,57 @@ public sealed class MultiCutAppService
         CancellationToken cancellationToken = default)
     {
         return RunAsync(
-            () => CreateShortcut(multiCut, shortcutPath, multiExPath, iconPath, iconIndex),
+            () => CreateShortcut(multiCutId, shortcutPath, multiExPath, iconPath, iconIndex),
+            cancellationToken);
+    }
+
+    /// <summary>
+    /// Updates a reusable launch target without blocking the UI thread.
+    /// </summary>
+    /// <param name="launchTargetId">The launch target database identifier.</param>
+    /// <param name="launchTarget">The updated launch target values.</param>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The affected parent MultiCuts.</returns>
+    public Task<OperationResult<IReadOnlyList<MultiCutRecord>>> UpdateLaunchTargetAsync(
+        long launchTargetId,
+        LaunchTarget launchTarget,
+        CancellationToken cancellationToken = default)
+    {
+        LaunchTarget launchTargetSnapshot;
+        try
+        {
+            ArgumentNullException.ThrowIfNull(launchTarget);
+            launchTargetSnapshot = new LaunchTarget(
+                launchTarget.Name,
+                launchTarget.Location,
+                launchTarget.Arguments);
+        }
+        catch (Exception exception)
+        {
+            return Task.FromResult(OperationResult<IReadOnlyList<MultiCutRecord>>.Failed(
+                "Unable to update launch target.",
+                exception));
+        }
+
+        return RunAsync(() => UpdateLaunchTarget(launchTargetId, launchTargetSnapshot), cancellationToken);
+    }
+
+    /// <summary>
+    /// Deletes a MultiCut without blocking the UI thread.
+    /// </summary>
+    /// <param name="multiCutId">The MultiCut database identifier.</param>
+    /// <param name="deleteJsonFile">Whether to delete the generated JSON file.</param>
+    /// <param name="deleteShortcutFile">Whether to delete the Windows shortcut file when known.</param>
+    /// <param name="cancellationToken">A token used to cancel the operation.</param>
+    /// <returns>The operation result.</returns>
+    public Task<OperationResult> DeleteMultiCutAsync(
+        long multiCutId,
+        bool deleteJsonFile = true,
+        bool deleteShortcutFile = false,
+        CancellationToken cancellationToken = default)
+    {
+        return RunAsync(
+            () => DeleteMultiCut(multiCutId, deleteJsonFile, deleteShortcutFile),
             cancellationToken);
     }
 
@@ -437,19 +621,6 @@ public sealed class MultiCutAppService
         }
     }
 
-    private static Task<OperationResult> RunAsync(
-        Func<OperationResult> operation,
-        CancellationToken cancellationToken)
-    {
-        return Task.Run(
-            () =>
-            {
-                cancellationToken.ThrowIfCancellationRequested();
-                return operation();
-            },
-            cancellationToken);
-    }
-
     private static Task<OperationResult<T>> RunAsync<T>(
         Func<OperationResult<T>> operation,
         CancellationToken cancellationToken)
@@ -463,7 +634,41 @@ public sealed class MultiCutAppService
             cancellationToken);
     }
 
-    private static T WithStorageLock<T>(Func<T> operation)
+    private static Task<OperationResult> RunAsync(
+        Func<OperationResult> operation,
+        CancellationToken cancellationToken)
+    {
+        return Task.Run(
+            () =>
+            {
+                cancellationToken.ThrowIfCancellationRequested();
+                return operation();
+            },
+            cancellationToken);
+    }
+
+    private static bool TrySnapshotLaunchTargets(
+        IEnumerable<LaunchTarget> launchTargets,
+        string failureMessage,
+        out List<LaunchTarget> snapshot,
+        out OperationResult<MultiCutRecord> failure)
+    {
+        try
+        {
+            snapshot = launchTargets.ToList();
+            failure = OperationResult<MultiCutRecord>.Succeeded(
+                new MultiCutRecord(0, string.Empty, string.Empty, null, null, null, []));
+            return true;
+        }
+        catch (Exception exception)
+        {
+            snapshot = [];
+            failure = OperationResult<MultiCutRecord>.Failed(failureMessage, exception);
+            return false;
+        }
+    }
+
+    private T WithStorageLock<T>(Func<T> operation)
     {
         using var storageMutex = new Mutex(false, StorageMutexName);
         bool lockAcquired = false;
@@ -483,6 +688,7 @@ public sealed class MultiCutAppService
                 throw new TimeoutException("MultiCut storage is busy. Try again in a few seconds.");
             }
 
+            EnsureInitialized();
             return operation();
         }
         finally
@@ -492,6 +698,17 @@ public sealed class MultiCutAppService
                 storageMutex.ReleaseMutex();
             }
         }
+    }
+
+    private void EnsureInitialized()
+    {
+        if (initialized)
+        {
+            return;
+        }
+
+        repository.Initialize();
+        initialized = true;
     }
 
     private string ResolveJsonPath(string name, string? jsonPath)
@@ -508,10 +725,49 @@ public sealed class MultiCutAppService
             : pathService.NormalizeShortcutPath(shortcutPath);
     }
 
-    private static string BuildLoadMessage(LoadMultiCutsResult result)
+    private void CreateShortcutFile(
+        MultiCutRecord multiCut,
+        string shortcutPath,
+        string? multiExPath,
+        string? iconPath,
+        int? iconIndex)
     {
-        return result.HasSkippedFiles
-            ? $"Loaded {result.MultiCuts.Count} MultiCuts. Skipped {result.SkippedFiles.Count} file(s)."
-            : $"Loaded {result.MultiCuts.Count} MultiCuts.";
+        string resolvedMultiExPath = pathService.ResolveMultiExPath(multiExPath ?? MultiExPath);
+        shortcutCreationService.CreateShortcut(
+            multiCut.ToShortcutContract(),
+            shortcutPath,
+            resolvedMultiExPath,
+            iconPath,
+            iconIndex);
+    }
+
+    private void RefreshShortcutForJsonPathChange(MultiCutRecord multiCut)
+    {
+        if (string.IsNullOrWhiteSpace(multiCut.ShortcutPath))
+        {
+            return;
+        }
+
+        CreateShortcutFile(
+            multiCut,
+            multiCut.ShortcutPath,
+            null,
+            multiCut.IconPath,
+            multiCut.IconIndex);
+    }
+
+    private static void WriteJson(MultiCutRecord multiCut)
+    {
+        MultiCutShortcutJson.WriteToFile(multiCut.ToShortcutContract(), multiCut.JsonPath);
+    }
+
+    private static void DeleteGeneratedFile(bool shouldDelete, string? filePath)
+    {
+        if (!shouldDelete || string.IsNullOrWhiteSpace(filePath) || !File.Exists(filePath))
+        {
+            return;
+        }
+
+        File.Delete(filePath);
     }
 }

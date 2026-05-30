@@ -10,15 +10,25 @@ public sealed class MultiCutPathService
 {
     private const string AppFolderName = "MultiCut";
     private const string ShortcutContractFolderName = "Shortcuts";
+    private const string DatabaseFileName = "MultiCut.db";
     private const string MultiExExecutableName = "MultiEX.exe";
+
+    /// <summary>
+    /// Gets the default application data directory.
+    /// </summary>
+    public string DefaultAppDataDirectory { get; } = Path.Combine(
+        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
+        AppFolderName);
 
     /// <summary>
     /// Gets the default directory for MultiCut JSON files.
     /// </summary>
-    public string DefaultJsonDirectory { get; } = Path.Combine(
-        Environment.GetFolderPath(Environment.SpecialFolder.LocalApplicationData),
-        AppFolderName,
-        ShortcutContractFolderName);
+    public string DefaultJsonDirectory => Path.Combine(DefaultAppDataDirectory, ShortcutContractFolderName);
+
+    /// <summary>
+    /// Gets the default SQLite database path.
+    /// </summary>
+    public string DefaultDatabasePath => Path.Combine(DefaultAppDataDirectory, DatabaseFileName);
 
     /// <summary>
     /// Gets the default directory for Windows .lnk files created by the UI.

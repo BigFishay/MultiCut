@@ -1,7 +1,6 @@
 using System.Diagnostics;
 using System.IO;
 using System.Threading;
-using System.Text.Json;
 using MultiCut.Shortcuts;
 
 namespace MultiEX
@@ -73,18 +72,7 @@ namespace MultiEX
         private static IReadOnlyList<LaunchTarget> LoadLaunchTargets(string jsonLocation)
         {
             string jsonPath = Environment.ExpandEnvironmentVariables(jsonLocation.Trim().Trim('"'));
-            string json = File.ReadAllText(jsonPath);
-
-            var options = new JsonSerializerOptions
-            {
-                PropertyNameCaseInsensitive = true
-            };
-
-            MultiCutShortcut? multiCut = JsonSerializer.Deserialize<MultiCutShortcut>(json, options);
-            if (multiCut is null)
-            {
-                throw new InvalidDataException("MultiCut JSON cannot be null.");
-            }
+            MultiCutShortcut multiCut = MultiCutShortcutJson.ReadFromFile(jsonPath);
 
             if (multiCut.LaunchTargets is null || multiCut.LaunchTargets.Count == 0)
             {
@@ -103,37 +91,21 @@ namespace MultiEX
                     continue;
                 }
 
-                NormalizeLaunchTarget(launchTarget, index);
-
-                if (string.IsNullOrWhiteSpace(launchTarget.Location))
+                try
                 {
-                    LogError($"Launch target '{launchTarget.Name}' does not include a location and was skipped.");
+                    validatedLaunchTargets.Add(LaunchTargetRules.NormalizeLaunchTarget(launchTarget));
+                }
+                catch (Exception exception)
+                {
+                    string targetName = string.IsNullOrWhiteSpace(launchTarget.Name)
+                        ? $"Launch target {index + 1}"
+                        : launchTarget.Name.Trim();
+                    LogError($"Launch target '{targetName}' is invalid and was skipped.", exception);
                     continue;
                 }
-
-                validatedLaunchTargets.Add(launchTarget);
             }
 
             return validatedLaunchTargets;
-        }
-
-        /// <summary>
-        /// Cleans up display and launch values after JSON deserialization.
-        /// </summary>
-        /// <param name="launchTarget">The launch target to normalize.</param>
-        /// <param name="index">The zero-based JSON array position, used for fallback names.</param>
-        private static void NormalizeLaunchTarget(LaunchTarget launchTarget, int index)
-        {
-            string fallbackName = $"Launch target {index + 1}";
-            if (!string.IsNullOrWhiteSpace(launchTarget.Location))
-            {
-                launchTarget.Location = launchTarget.Location.Trim();
-                fallbackName = launchTarget.Location;
-            }
-
-            launchTarget.Name = string.IsNullOrWhiteSpace(launchTarget.Name)
-                ? fallbackName
-                : launchTarget.Name.Trim();
         }
 
         /// <summary>

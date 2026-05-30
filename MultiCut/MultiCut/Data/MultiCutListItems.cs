@@ -1,3 +1,5 @@
+using MultiCut.Shortcuts;
+
 namespace MultiCut.Data;
 
 /// <summary>
@@ -41,3 +43,32 @@ public sealed record LaunchTargetListItem(
     string CreatedAt,
     string UpdatedAt,
     long MultiCutCount);
+
+/// <summary>
+/// Database projection for one complete MultiCut and its ordered launch targets.
+/// </summary>
+/// <param name="Id">The database identifier.</param>
+/// <param name="Name">The user-facing MultiCut name.</param>
+/// <param name="JsonPath">The absolute JSON path used by MultiEX shortcuts.</param>
+/// <param name="ShortcutPath">The optional Windows shortcut path.</param>
+/// <param name="IconPath">The optional icon source path.</param>
+/// <param name="IconIndex">The optional icon index for executable or DLL icon sources.</param>
+/// <param name="LaunchTargets">The ordered launch targets assigned to this MultiCut.</param>
+public sealed record MultiCutRecord(
+    long Id,
+    string Name,
+    string JsonPath,
+    string? ShortcutPath,
+    string? IconPath,
+    int? IconIndex,
+    IReadOnlyList<LaunchTarget> LaunchTargets)
+{
+    /// <summary>
+    /// Converts the database projection into the JSON contract consumed by MultiEX.
+    /// </summary>
+    /// <returns>A shortcut contract with the record launch targets.</returns>
+    public MultiCutShortcut ToShortcutContract()
+    {
+        return new MultiCutShortcut(Name, JsonPath, LaunchTargets);
+    }
+}

@@ -1,11 +1,10 @@
 namespace MultiCut.Data;
 
 /// <summary>
-/// Defines the planned SQLite schema for persisted MultiCut metadata.
+/// Defines the SQLite schema for persisted MultiCut metadata.
 /// </summary>
 /// <remarks>
-/// The app does not need SQLite for the first UI bridge, but keeping the schema here makes
-/// the database design executable documentation instead of a separate proposal note.
+/// SQLite is the UI source of truth. MultiEX JSON files are generated from these tables.
 /// </remarks>
 internal static class MultiCutDatabaseSchema
 {
